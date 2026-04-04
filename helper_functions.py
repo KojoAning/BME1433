@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import skimage 
 from skimage.filters import threshold_otsu
 from scipy.signal import savgol_filter, find_peaks
+from scipy.ndimage import binary_fill_holes
 
 matplotlib.rcParams['font.size'] = 8
 from algorithms import *
@@ -299,7 +300,7 @@ def find_centromere(chrom_img):
     centromere_row : int
     """
     thresh       = threshold_otsu(chrom_img)
-    chrom_mask   = chrom_img < thresh
+    chrom_mask = binary_fill_holes(chrom_img < thresh)
     widths       = chrom_mask.sum(axis=1).astype(float)
 
     # Smooth the width profile to suppress noise
