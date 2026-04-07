@@ -118,16 +118,15 @@ def chromosome_mask_with_active_contour(img_path,
 
 def chromosome_mask_with_contrast_stretching(img_path,
                             gaussian_sigma=0.3,
-                            tophat_disk_size=3,
+                            tophat_disk_size=15,
                             block_size=101,
-                            closing_disk_size=8,
                             opening_disk_size=5,
                             min_object_size=600,
                             max_object_size=30000,
                             max_eccentricity=0.97,
                             plot=True,with_otsu=False):
     """
-    Segment chromosomes from a grayscale microscopy image.
+    Segment chromosomes using contrast stretching as an contrast enhancement technique.
 
     Parameters
     ----------
@@ -206,15 +205,14 @@ def chromosome_mask_with_adaptive_histogram(img_path,
                         clahe_clip_limit=0.03,
                         tophat_disk_size=15,
                         block_size=101,
-                        closing_disk_size=8,
-                        opening_disk_size=8,
-                        min_object_size=600,
+                        opening_disk_size=7,
+                        min_object_size=400,
                         max_object_size=30000,
                         max_eccentricity=0.97,
-                        min_distance=10,
+                        min_distance=3,
                         plot=True,with_otsu=True):
     """
-    Segment chromosomes from a grayscale microscopy image.
+    Segment chromosomes using adaptive histogram equalization as a contrast enhancement technique.
 
     Parameters
     ----------
@@ -261,21 +259,17 @@ def chromosome_mask_with_adaptive_histogram(img_path,
 
     binary_local = tophat > local_thresholds
 
-    # Remove large blobs (e.g. nuclei) before closing so they don't get fragmented
     labeled_pre = label(binary_local)
     for region in regionprops(labeled_pre):
         if region.area > max_object_size:
             binary_local[labeled_pre == region.label] = False
 
-    # Close gaps between chromosome bands before opening
-    # binary_closed = skimage.morphology.closing(binary_local, disk(closing_disk_size))
+
     binary_opened = skimage.morphology.opening(binary_local, disk(opening_disk_size))
     binary_opened = remove_small_objects(binary_opened, min_size=min_object_size)
     binary_opened = clear_border(binary_opened)
 
-    # Watershed to split clustered chromosomes
-    # Use gradient magnitude as the flooding surface so splits happen at true
-    # intensity valleys (chromosome boundaries) rather than geometric midpoints.
+
     gradient  = skimage.filters.sobel(img_adapteq)
     distance  = distance_transform_edt(binary_opened)
     coords    = peak_local_max(distance, min_distance=min_distance, labels=binary_opened)
@@ -285,7 +279,6 @@ def chromosome_mask_with_adaptive_histogram(img_path,
     labels_ws = watershed(gradient, markers, mask=binary_opened)
     mask = labels_ws > 0
 
-    # Remove remaining large objects and scale-bar-like artifacts (high eccentricity)
     labeled_mask = label(mask)
     for region in regionprops(labeled_mask):
         if region.area > max_object_size or region.eccentricity > max_eccentricity:
@@ -302,6 +295,77 @@ def chromosome_mask_with_adaptive_histogram(img_path,
         axes[2].set_title(f"Distance transform + peaks (min_dist={min_distance})")
         axes[3].imshow(labels_ws, cmap='nipy_spectral')
         axes[3].set_title(f"After watershed ({labels_ws.max()} objects)")
+        for ax in axes:
+            ax.axis('off')
+        plt.tight_layout()
+        plt.show()
+
+    return binary_opened
+
+def chromosome_mask_thresholding(img_path,
+                        gaussian_sigma=0.3,
+                        max_object_size=30000,
+                        max_eccentricity=0.97,
+                        min_distance=10,
+                        plot=True,with_otsu=True):
+    """
+    Segment chromosomes from a grayscale microscopy image.
+
+    Parameters
+    ----------
+    img_path        : str or array — file path or preloaded image array
+    gaussian_sigma  : float — smoothing strength (default 0.3)
+    clahe_clip_limit: float — CLAHE contrast limit (default 0.03)
+    tophat_disk_size: int   — structuring element radius for top-hat (default 15)
+    block_size      : int   — local threshold window, must be odd (default 101)
+    opening_disk_size: int  — morphological opening radius (default 5)
+    min_object_size : int   — minimum blob area in pixels to keep (default 600)
+    plot            : bool  — show side-by-side figure (default True)
+
+    Returns
+    -------
+    mask : np.ndarray (bool) — binary chromosome mask
+    """
+
+    if isinstance(img_path, (str, Path)):
+        img_raw = skimage.io.imread(img_path, as_gray=True)
+    else:
+        img_raw = img_path.copy()
+
+    img = skimage.filters.gaussian(img_raw, gaussian_sigma, preserve_range=True)
+    img = np.clip(img, 0, 1)
+
+
+    thresh_mask = img < 0.8
+    mask = remove_small_objects(thresh_mask, min_size=100)
+    binary_closed = skimage.morphology.closing(mask, disk(3))
+
+
+
+    # Remove large blobs (e.g. nuclei) before closing so they don't get fragmented
+    labeled_pre = label(binary_closed)
+    for region in regionprops(labeled_pre):
+        if region.area > max_object_size:
+            binary_closed[labeled_pre == region.label] = False
+
+    mask = clear_border(binary_closed)
+
+
+
+    # Remove remaining large objects and scale-bar-like artifacts (high eccentricity)
+    labeled_mask = label(mask)
+    for region in regionprops(labeled_mask):
+        if region.area > max_object_size or region.eccentricity > max_eccentricity:
+            mask[labeled_mask == region.label] = False
+
+    if plot:
+        fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+        axes[0].imshow(img_raw, cmap='gray')
+        axes[0].set_title("Preprocessed")
+        axes[1].imshow(thresh_mask, cmap='gray')
+        axes[1].set_title("thresholding mask")
+        axes[2].imshow(mask, cmap='gray')
+        axes[2].set_title("Final mask")
         for ax in axes:
             ax.axis('off')
         plt.tight_layout()
@@ -775,6 +839,8 @@ def classify_denver_groups(df,
                                  centromere row; captures arm width variation.
                                  NaN when centromere_position or chrom_img is NaN.
         centromere_type   : 'metacentric' | 'submetacentric' | 'acrocentric' | 'unknown'
+        arm_ratio         : longer_arm / shorter_arm, in [1, ∞)
+                            NaN when centromere_position is NaN
         denver_group      : 'A'–'G', 'D/E' (ambiguous without centromere), or 'unknown'
 
     Notes
@@ -801,11 +867,13 @@ def classify_denver_groups(df,
     # ------------------------------------------------------------------ #
     def _ci(row):
         cp = row[centromere_col]
-        ln = row[length_col]
-        if pd.isna(cp) or ln == 0:
+        ln = row['aligned_length'] if 'aligned_length' in row.index else row[length_col]
+        if pd.isna(cp) or pd.isna(ln) or ln == 0:
             return np.nan
         p = float(cp)
         q = float(ln) - p
+        if p <= 0 or q <= 0:
+            return np.nan
         short = min(p, q)
         return short / float(ln)
 
@@ -831,6 +899,23 @@ def classify_denver_groups(df,
 
     result['centromeric_index_area'] = result.apply(_ci_area, axis=1)
     result['centromere_type']        = result['centromeric_index'].map(_centromere_type)
+
+    # ------------------------------------------------------------------ #
+    # 1c. Arm ratio  (longer_arm / shorter_arm)
+    # ------------------------------------------------------------------ #
+    def _arm_ratio(row):
+        cp = row[centromere_col]
+        # use aligned_length if available — same coordinate system as centromere_position
+        ln = row['aligned_length'] if 'aligned_length' in row.index else row[length_col]
+        if pd.isna(cp) or pd.isna(ln) or ln == 0:
+            return np.nan
+        p = float(cp)
+        q = float(ln) - p
+        if p <= 0 or q <= 0:
+            return np.nan
+        return max(p, q) / min(p, q)
+
+    result['arm_ratio'] = result.apply(_arm_ratio, axis=1)
 
     # ------------------------------------------------------------------ #
     # 2. Relative length within each image (% of total detected length)
@@ -888,6 +973,7 @@ def extract_chromosome_features(img_paths, method='adaptive_histogram',
         img_gray = np.clip(img_gray, 0, 1)
 
         mask    = chromosome_mask_with_adaptive_histogram(img_path, plot=plot)
+        # mask = chromosome_mask_thresholding(img_path, plot=plot)
         labeled = label(mask)
         regions = regionprops(labeled)
 
@@ -949,6 +1035,7 @@ def extract_centromere_and_bands(df, plot=False):
     result               = df.copy()
     centromere_positions = []
     n_bands_list         = []
+    aligned_lengths      = []
 
     for _, row in result.iterrows():
         chrom = row['chrom_img']
@@ -967,6 +1054,10 @@ def extract_centromere_and_bands(df, plot=False):
         else:
             p2, p98     = np.percentile(aligned_white[aligned_white < 1.0], (2, 98))
             display_img = exposure.rescale_intensity(aligned_white, in_range=(p2, p98))
+
+        # store aligned image height — used as the true chromosome length
+        # for arm ratio / centromeric index (avoids mismatch with regionprops length)
+        aligned_lengths.append(aligned_white.shape[0])
 
         # centromere
         try:
@@ -1000,9 +1091,9 @@ def extract_centromere_and_bands(df, plot=False):
             if profile is not None:
                 axes[1].plot(profile,  color='steelblue', lw=1,   label='raw')
                 axes[1].plot(smoothed, color='orange',    lw=1.5, label='smoothed')
-                if len(peaks):
-                    axes[1].plot(peaks, smoothed[peaks], 'rv', markersize=6,
-                                 label=f'{len(peaks)} bands')
+                # if len(peaks):
+                #     axes[1].plot(peaks, smoothed[peaks], 'rv', markersize=6,
+                #                  label=f'{len(peaks)} bands')
                 if not np.isnan(c_pos):
                     axes[1].axvline(c_pos, color='red', lw=1.2, linestyle='--',
                                     label='centromere')
@@ -1026,7 +1117,68 @@ def extract_centromere_and_bands(df, plot=False):
 
     result['centromere_position'] = centromere_positions
     result['n_bands']             = n_bands_list
+    result['aligned_length']      = aligned_lengths
     return result
+
+
+def plot_segmentation_comparison(img_paths, overlay_color=(0.2, 0.8, 0.2), alpha=0.4,
+                                  figsize=(18, 4)):
+    """
+    For each image, run all four segmentation algorithms, overlay the resulting
+    mask in colour on the original image, and display them side by side.
+
+    Parameters
+    ----------
+    img_paths      : list of Path — images to process
+    overlay_color  : RGB tuple (0–1) — colour used for the mask overlay
+    alpha          : float — transparency of the overlay (0 = invisible, 1 = opaque)
+    figsize        : tuple — figure size per image row
+
+    Returns
+    -------
+    None — displays matplotlib figures
+    """
+    algorithms = {
+        'Original':             None,
+        'Adaptive Histogram':   lambda p: chromosome_mask_with_adaptive_histogram(p, plot=False),
+        'Contrast Stretching':  lambda p: chromosome_mask_with_contrast_stretching(p, plot=False),
+        'Thresholding':         lambda p: chromosome_mask_thresholding(p, plot=False),
+        'Active Contour':       lambda p: chromosome_mask_with_active_contour(p, plot=False),
+    }
+
+    for img_path in img_paths:
+        img_gray = skimage.io.imread(img_path, as_gray=True)
+        img_gray = np.clip(img_gray, 0, 1)
+
+        # convert grayscale to RGB for overlay
+        img_rgb  = np.stack([img_gray] * 3, axis=-1)
+
+        fig, axes = plt.subplots(1, len(algorithms), figsize=figsize)
+        fig.suptitle(Path(img_path).name, fontsize=11)
+
+        for ax, (name, fn) in zip(axes, algorithms.items()):
+            if fn is None:
+                ax.imshow(img_rgb)
+                ax.set_title('Original', fontsize=9)
+            else:
+                try:
+                    mask = fn(img_path)
+                    overlay = img_rgb.copy()
+                    for c, val in enumerate(overlay_color):
+                        overlay[:, :, c] = np.where(mask,
+                                                     alpha * val + (1 - alpha) * img_rgb[:, :, c],
+                                                     img_rgb[:, :, c])
+                    ax.imshow(overlay)
+                    n = label(mask).max()
+                    ax.set_title(f'{name}\n({n} detected)', fontsize=9)
+                except Exception as e:
+                    ax.imshow(img_rgb)
+                    ax.set_title(f'{name}\n(failed)', fontsize=9, color='red')
+
+            ax.axis('off')
+
+        plt.tight_layout()
+        plt.show()
 
 
 def plot_denver_groups(df_classified, image_col='image_name', figsize=(10, 5)):
